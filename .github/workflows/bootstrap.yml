@@ -1,0 +1,102 @@
+﻿name: MLOps Bootstrap
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+
+    steps:
+      # -------------------------------------------------------
+      # 1. Checkout the TARGET repository (the user's ML project)
+      #    persist-credentials: false so the default GITHUB_TOKEN
+      #    (which lacks the workflows scope) is NOT used for the
+      #    final push. We push explicitly via MLOPS_TOKEN instead.
+      # -------------------------------------------------------
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # -------------------------------------------------------
+      # 2. Checkout the AUTOMATION repository (generator + templates)
+      #    into .mlops-automation/ using MLOPS_TOKEN.
+      #    Configure via: Settings > Variables > Actions
+      #    Variable name : MLOPS_AUTOMATION_REPO
+      #    Example value : YourOrg/MLOps-Automation
+      # -------------------------------------------------------
+      - name: Checkout automation repository
+        uses: actions/checkout@v4
+        with:
+          repository: Yashjoshi2622/MLOps-Automation
+          path: .mlops-automation
+          token: ${{ secrets.MLOPS_TOKEN }}
+
+      # -------------------------------------------------------
+      # 3. Remove .mlops-automation/.git so git does NOT treat it
+      #    as an embedded repository / submodule. This prevents
+      #    "embedded git repository" warnings and ensures the
+      #    folder is never staged or committed.
+      # -------------------------------------------------------
+      - name: Remove embedded .git from automation folder
+        run: rm -rf .mlops-automation/.git
+
+      # -------------------------------------------------------
+      # 4. Set up Python
+      # -------------------------------------------------------
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      # -------------------------------------------------------
+      # 5. Run the generator against the TARGET repo (current dir)
+      # -------------------------------------------------------
+      - name: Run MLOps generator
+        run: |
+          python .mlops-automation/scripts/generate_project.py .
+
+      # -------------------------------------------------------
+      # 6. Commit generated MLOps files back to the TARGET repo.
+      #    .mlops-automation/ is explicitly unstaged so it is
+      #    NEVER committed or pushed.
+      #    Push is authenticated via MLOPS_TOKEN (has repo +
+      #    workflow scopes) so .github/workflows/*.yml can be
+      #    written without permission errors.
+      # -------------------------------------------------------
+      - name: Commit generated MLOps files
+        env:
+          GH_TOKEN: ${{ secrets.MLOPS_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Stage everything in the target repo
+          git add .
+
+          # Unstage the automation temp folder (belt-and-suspenders guard)
+          git reset -- .mlops-automation/ 2>/dev/null || true
+
+          # Only commit + push when there are actual staged changes
+          if git diff --cached --quiet; then
+            echo "No new MLOps files to commit. Skipping push."
+          else
+            git commit -m "chore: bootstrap MLOps setup [skip ci]"
+            git pull --rebase origin main
+            git push https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git HEAD:main
+          fi
+
+      # -------------------------------------------------------
+      # 7. Always clean up the temp automation folder
+      # -------------------------------------------------------
+      - name: Cleanup automation temp folder
+        if: always()
+        run: rm -rf .mlops-automation
